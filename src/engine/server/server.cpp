@@ -966,7 +966,18 @@ void CServer::ConvertSnapshot7(const CSnapshot* pSnapshot, int ClientID)
 			const auto* pSrc = static_cast<const CNetObj_GameInfo*>(pData);
 			protocol7::CNetObj_GameData Dst {};
 			Dst.m_GameStartTick = pSrc->m_RoundStartTick;
-			Dst.m_GameStateFlags = pSrc->m_GameStateFlags;
+			// 0.6 and 0.7 assign different bits to the game-state flags. Copying
+			// the value directly can turn RACETIME into GAMEOVER on the legacy
+			// client, which disables mouse input and freezes free-view cameras.
+			Dst.m_GameStateFlags = 0;
+			if(pSrc->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER)
+				Dst.m_GameStateFlags |= protocol7::GAMESTATEFLAG_GAMEOVER;
+			if(pSrc->m_GameStateFlags & GAMESTATEFLAG_SUDDENDEATH)
+				Dst.m_GameStateFlags |= protocol7::GAMESTATEFLAG_SUDDENDEATH;
+			if(pSrc->m_GameStateFlags & GAMESTATEFLAG_PAUSED)
+				Dst.m_GameStateFlags |= protocol7::GAMESTATEFLAG_PAUSED;
+			if(pSrc->m_WarmupTimer > 0)
+				Dst.m_GameStateFlags |= protocol7::GAMESTATEFLAG_WARMUP;
 			Dst.m_GameStateEndTick = pSrc->m_WarmupTimer > 0 ? Tick() + pSrc->m_WarmupTimer : 0;
 			CopyItem(protocol7::NETOBJTYPE_GAMEDATA, ID, &Dst, sizeof(Dst));
 
