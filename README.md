@@ -1,125 +1,191 @@
-MRPG server transfer version from 0.7 to 0.6 (ddnet) with ex protocol and features
-[![CircleCI](https://circleci.com/gh/teeworlds/teeworlds.svg?style=svg)](https://circleci.com/gh/teeworlds/teeworlds) [![AppVeyor Build Status](https://ci.appveyor.com/api/projects/status/github/teeworlds/teeworlds?branch=master&svg=true)](https://ci.appveyor.com/project/heinrich5991/teeworlds)
-=========
-Wiki about maintaining mod: https://github.com/kurosio/Teeworlds-MRPG-0.6/wiki
+# Teeworlds MRPG Server
 
-`readme will be changed over time`
+MRPG server based on the Teeworlds/DDNet 0.6 codebase, with a compatibility
+bridge for the custom
+[Teeworlds MRPG 0.7 Client](https://github.com/sqwinixxx/Teeworlds-MRPG-Client).
 
-# Not frozen but extremely rare development due to a lot of things to do besides MRPG
+## Compatibility
 
-A retro multiplayer shooter
---------------------------- 
+| Client | Support |
+| --- | --- |
+| [Teeworlds-MRPG-Client](https://github.com/sqwinixxx/Teeworlds-MRPG-Client) | Full MRPG support (recommended) |
+| Vanilla Teeworlds 0.6/DDNet client | Base protocol connection is supported, but the custom MRPG UI is unavailable |
+| Vanilla Teeworlds 0.7 client | Sixup connection may work, but the custom MRPG UI and messages are unavailable |
 
-Teeworlds is a free online multiplayer game, available for all major
-operating systems. Battle with up to 16 players in a variety of game
-modes, including Team Deathmatch and Capture The Flag. You can even
-design your own maps!
+The server keeps its native 0.6 path and adds a dedicated 0.7 compatibility
+path. The bridge translates connection packets, map transfer, snapshots,
+standard game messages, client identity, game information and MRPG-specific
+handshake/account messages. It also translates 0.6 game-state flags instead of
+copying their bit values directly, which keeps tutorial and free-view camera
+input working on the custom 0.7 client.
 
-This software is provided 'as-is', without any express or implied
-warranty. In no event will the authors be held liable for any damages
-arising from the use of this software. See license.txt for full license
-text including copyright information.
+Full gameplay is tested with the client and server repositories linked above.
+Generic clients do not implement the MRPG account window, HUD or custom visual
+systems and are therefore not a complete replacement.
 
-Please visit https://www.teeworlds.com/ for up-to-date information about
-the game, including new versions, custom maps and much more.
+## Server features
 
-Originally written by Magnus Auvinen.
+- Account registration and login backed by MariaDB.
+- Multi-world loading from the `tw_worlds` database table.
+- Quests, NPCs, monsters, dungeons, professions, skills and equipment.
+- Inventory, crafting, trading, auction, guild and warehouse systems.
+- MRPG HUD data, broadcasts, vote menus and server-side visual entities.
+- Map download and snapshot conversion for the paired legacy 0.7 client.
+- Native 0.6 networking retained alongside the custom 0.7 bridge.
 
-Building on Linux or macOS
-==========================
+## Build on Linux
 
-Installing dependencies
------------------------
+### Dependencies
 
-    # Debian/Ubuntu
-    sudo apt install build-essential cmake git libfreetype6-dev libsdl2-dev libpnglite-dev libwavpack-dev python3
+Debian/Ubuntu:
 
-    # Fedora
-    sudo dnf install @development-tools cmake gcc-c++ git freetype-devel mesa-libGLU-devel pnglite-devel python3 SDL2-devel wavpack-devel
+```bash
+sudo apt update
+sudo apt install build-essential cmake git python3 \
+  libmariadb-dev libsqlite3-dev libcurl4-openssl-dev libssl-dev zlib1g-dev
+```
 
-    # Arch Linux (doesn't have pnglite in its repositories)
-    sudo pacman -S --needed base-devel cmake freetype2 git glu python sdl2 wavpack
+Arch Linux:
 
-    # macOS
-    brew install cmake freetype sdl2
+```bash
+sudo pacman -S --needed base-devel cmake git python mariadb-libs sqlite \
+  curl openssl zlib
+```
 
+Clone and build:
 
-Downloading repository
-----------------------
+```bash
+git clone --recurse-submodules https://github.com/sqwinixxx/Teeworlds-MRPG-Server.git
+cd Teeworlds-MRPG-Server
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target mmoteeworlds_srv -j4
+```
 
-    git clone https://github.com/teeworlds/teeworlds --recurse-submodules
-    cd teeworlds
+If the repository was cloned without submodules:
 
-    # If you already cloned the repository before, use:
-    # git submodule update --init
+```bash
+git submodule update --init --recursive
+```
 
+## Database setup
 
-Building
---------
+MariaDB is required for worlds, accounts and all persistent MRPG data. The
+included `mmprpg_clean.sql` file contains the schema and initial game data.
 
-    mkdir -p build
-    cd build
-    cmake ..
-    make
+Example setup:
 
-On subsequent builds, you only have to repeat the `make` step.
+```bash
+sudo mariadb
+```
 
-You can then run the client with `./teeworlds` and the server with `./teeworlds_srv`.
+```sql
+CREATE DATABASE mrpg CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'mrpg'@'localhost' IDENTIFIED BY 'change_this_password';
+GRANT ALL PRIVILEGES ON mrpg.* TO 'mrpg'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+```
 
+Import the database:
 
-Build options
--------------
+```bash
+mariadb -u mrpg -p mrpg < mmprpg_clean.sql
+```
 
-The following options can be passed to the `cmake ..` command line (between the
-`cmake` and `..`) in the "Building" step above.
+Use a unique database password in production. Do not commit it to the
+repository.
 
-`-GNinja`: Use the Ninja build system instead of Make. This automatically
-parallizes the build and is generally **faster**. (Needs `sudo apt install
-ninja-build` on Debian, `sudo dnf install ninja-build` on Fedora, and `sudo
-pacman -S --needed ninja` on Arch Linux.)
+## Configuration
 
-`-DDEV=ON`: Enable debug mode and disable some release mechanics. This leads to
-**faster** builds.
+Create `autoexec_server.cfg` in the repository root. It is intentionally
+ignored by Git so database and RCON passwords are not published.
 
-Building on Windows with Visual Studio
-======================================
+Minimal example:
 
-Download and install some version of [Microsoft Visual
-Studio](https://www.visualstudio.com/) (as of writing, MSVS Community 2017)
-with the following components:
+```cfg
+sv_name "Teeworlds MRPG"
+sv_port 8310
+sv_register 0
+sv_map main
+sv_gamemode_name "MRPG"
 
-* Desktop development with C++ (on the main page)
-* Python development (on the main page)
-* Git for Windows (in Individual Components → Code tools)
+# Required for the paired custom 0.7 client.
+sv_sixup 1
 
-Run Visual Studio. Open the Team Explorer (View → Team Explorer, Ctrl+^,
-Ctrl+M). Click Clone (in the Team Explorer, Connect → Local Git Repositories).
-Enter `https://github.com/teeworlds/teeworlds` into the first input box. Wait
-for the download to complete (terminals might pop up).
+# Leave empty unless every player should enter a connection password before
+# the separate MRPG account login/register screen.
+password ""
 
-Wait until the CMake configuration is done (watch the Output windows at the
-bottom).
+sv_rcon_password "replace_with_a_long_random_password"
 
+sv_sql_host "127.0.0.1"
+sv_sql_port 3306
+sv_sql_database "mrpg"
+sv_sql_login "mrpg"
+sv_sql_password "change_this_password"
+sv_sql_pool_size 3
+sv_sql_use_tls 0
+```
 
-Building on Windows with MinGW
-==============================
+Important settings:
 
-Download and install MinGW with at least the following components:
+- `sv_sixup 1` enables connections from the paired custom 0.7 client.
+- `password` is the server connection password, not an MRPG account password.
+- `sv_register 0` keeps a development server private. Configure registration and firewall/NAT rules before publishing it.
+- `sv_map main` selects the initial map; additional worlds are loaded from the database.
+- `sv_sql_*` must match the MariaDB database and user created above.
 
-- mingw-developer-toolkit-bin
-- mingw32-base-bin
-- mingw32-gcc-g++-bin
-- msys-base-bin
+## Running
 
-Also install [Git](https://git-scm.com/downloads) (for downloading the source
-code), [Python](https://www.python.org/downloads/) and
-[CMake](https://cmake.org/download/).
+Start the binary from the repository root. This working directory is required
+for maps, `server_data`, language files and configuration files to resolve
+correctly.
 
-Open CMake ("CMake (cmake-gui)" in the start menu). Click "Browse Source"
-(first line) and select the directory with the Teeworlds source code. Next,
-click "Browse Build" and create a subdirectory for the build (e.g. called
-"build"). Then click "Configure". Select "MinGW Makefiles" as the generator and
-click "Finish". Wait a bit (until the progress bar is full). Then click
-"Generate".
+```bash
+./build/mmoteeworlds_srv
+```
 
-You can now build Teeworlds by executing `mingw32-make` in the build directory.
+Players can then connect with the paired client to `SERVER_IP:8310`, or to the
+port selected in `sv_port`.
+
+## Account flow
+
+The paired client shows the rules and account window after joining:
+
+1. A new player accepts the rules and registers a login/password.
+2. An existing player enters the same login/password and selects **Join**.
+3. Account credentials are read from MariaDB and are separate from `password` in the server config.
+
+If the client asks for a password before displaying the MRPG account window,
+the server-level `password` setting is not empty.
+
+## Troubleshooting
+
+- **Custom 0.7 client cannot connect:** confirm this server build is running and `sv_sixup 1` is set.
+- **Map download fails:** run the server from the repository root and verify the required `.map` files exist in `maps/`.
+- **Worlds were not initialized:** verify the MariaDB connection and import `mmprpg_clean.sql`; the server loads world definitions from `tw_worlds`.
+- **Account password is incorrect:** confirm the player is using the registered MRPG password, not the server connection or RCON password.
+- **Client camera is locked in tutorial/free-view:** update both repositories to the same release; the compatibility bridge must translate game-state flags.
+- **SQL connection errors:** check `sv_sql_host`, port, database, user grants and whether MariaDB is running.
+
+## Releasing compatible builds
+
+Tag the client and server with the same version, for example `compat-v0.1.0`.
+The two tags then identify a tested pair. Publish client binaries in the client
+repository and server binaries or deployment notes in this repository. Never
+include production database, RCON or server passwords in release archives.
+
+## Related repository
+
+Required custom client:
+[sqwinixxx/Teeworlds-MRPG-Client](https://github.com/sqwinixxx/Teeworlds-MRPG-Client).
+
+The original 0.6 MRPG maintenance wiki is available in the
+[upstream repository](https://github.com/kurosio/Teeworlds-MRPG-0.6/wiki).
+
+## License and credits
+
+This project is based on Teeworlds, DDNet and the original MRPG server. See
+[`license.txt`](license.txt) for license and copyright information. Originally
+written by Magnus Auvinen and extended by the Teeworlds, DDNet and MRPG
+contributors.
