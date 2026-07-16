@@ -856,7 +856,116 @@ void CGS::OnPostSnap()
 void CGS::OnMessage(int MsgID, CUnpacker* pUnpacker, int ClientID)
 {
 	// If the unpacking failed, print a debug message and return
-	void* pRawMsg = m_NetObjHandler.SecureUnpackMsg(MsgID, pUnpacker);
+	void* pRawMsg = nullptr;
+	if(Server()->IsSixup(ClientID) && MsgID < OFFSET_UUID)
+	{
+		void* pRawMsg7 = m_NetObjHandler7.SecureUnpackMsg(MsgID, pUnpacker);
+		if(!pRawMsg7)
+			return;
+
+		static CNetMsg_Cl_Say s_Say;
+		static CNetMsg_Cl_SetTeam s_SetTeam;
+		static CNetMsg_Cl_SetSpectatorMode s_SetSpectatorMode;
+		static CNetMsg_Cl_StartInfo s_StartInfo;
+		static CNetMsg_Cl_Kill s_Kill;
+		static CNetMsg_Cl_Emoticon s_Emoticon;
+		static CNetMsg_Cl_Vote s_Vote;
+		static CNetMsg_Cl_CallVote s_CallVote;
+		static char s_aCommand[512];
+
+		if(MsgID == protocol7::NETMSGTYPE_CL_ISMMOSERVER)
+		{
+			Server()->SetStateClientMRPG(ClientID, true);
+			CMsgPacker Msg(protocol7::NETMSGTYPE_SV_AFTERISMMOSERVER, false, true);
+			Server()->SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_FLUSH | MSGFLAG_NORECORD, ClientID);
+			return;
+		}
+		if(MsgID == protocol7::NETMSGTYPE_CL_CLIENTAUTH)
+		{
+			auto* pMsg7 = static_cast<protocol7::CNetMsg_Cl_ClientAuth*>(pRawMsg7);
+			const AccountCodeResult Result = pMsg7->m_SelectRegister ?
+				Core()->AccountManager()->RegisterAccount(ClientID, pMsg7->m_Login, pMsg7->m_Password) :
+				Core()->AccountManager()->LoginAccount(ClientID, pMsg7->m_Login, pMsg7->m_Password);
+			if(Result == AccountCodeResult::AOP_MISMATCH_LENGTH_SYMBOLS)
+				SendLegacyAccountCode(ClientID, protocol7::AccountCodeResult::AOP_MISMATCH_LENGTH_SYMBOLS);
+			return;
+		}
+		else if(MsgID == protocol7::NETMSGTYPE_CL_COMMAND)
+		{
+			auto* pMsg7 = static_cast<protocol7::CNetMsg_Cl_Command*>(pRawMsg7);
+			str_format(s_aCommand, sizeof(s_aCommand), "/%s %s", pMsg7->m_Name, pMsg7->m_Arguments);
+			s_Say.m_Team = 0;
+			s_Say.m_pMessage = s_aCommand;
+			MsgID = NETMSGTYPE_CL_SAY;
+			pRawMsg = &s_Say;
+		}
+		else if(MsgID == protocol7::NETMSGTYPE_CL_SAY)
+		{
+			auto* pMsg7 = static_cast<protocol7::CNetMsg_Cl_Say*>(pRawMsg7);
+			s_Say.m_Team = pMsg7->m_Mode == protocol7::CHAT_TEAM;
+			s_Say.m_pMessage = pMsg7->m_pMessage;
+			MsgID = NETMSGTYPE_CL_SAY;
+			pRawMsg = &s_Say;
+		}
+		else if(MsgID == protocol7::NETMSGTYPE_CL_SETTEAM)
+		{
+			s_SetTeam.m_Team = static_cast<protocol7::CNetMsg_Cl_SetTeam*>(pRawMsg7)->m_Team;
+			MsgID = NETMSGTYPE_CL_SETTEAM;
+			pRawMsg = &s_SetTeam;
+		}
+		else if(MsgID == protocol7::NETMSGTYPE_CL_SETSPECTATORMODE)
+		{
+			auto* pMsg7 = static_cast<protocol7::CNetMsg_Cl_SetSpectatorMode*>(pRawMsg7);
+			s_SetSpectatorMode.m_SpectatorId = pMsg7->m_SpecMode == protocol7::SPEC_PLAYER ? pMsg7->m_SpectatorID : SPEC_FREEVIEW;
+			MsgID = NETMSGTYPE_CL_SETSPECTATORMODE;
+			pRawMsg = &s_SetSpectatorMode;
+		}
+		else if(MsgID == protocol7::NETMSGTYPE_CL_STARTINFO)
+		{
+			auto* pMsg7 = static_cast<protocol7::CNetMsg_Cl_StartInfo*>(pRawMsg7);
+			s_StartInfo.m_pName = pMsg7->m_pName;
+			s_StartInfo.m_pClan = pMsg7->m_pClan;
+			s_StartInfo.m_Country = pMsg7->m_Country;
+			s_StartInfo.m_pSkin = "default";
+			s_StartInfo.m_UseCustomColor = pMsg7->m_aUseCustomColors[0] || pMsg7->m_aUseCustomColors[4];
+			s_StartInfo.m_ColorBody = pMsg7->m_aSkinPartColors[0];
+			s_StartInfo.m_ColorFeet = pMsg7->m_aSkinPartColors[4];
+			MsgID = NETMSGTYPE_CL_STARTINFO;
+			pRawMsg = &s_StartInfo;
+		}
+		else if(MsgID == protocol7::NETMSGTYPE_CL_KILL)
+		{
+			MsgID = NETMSGTYPE_CL_KILL;
+			pRawMsg = &s_Kill;
+		}
+		else if(MsgID == protocol7::NETMSGTYPE_CL_EMOTICON)
+		{
+			s_Emoticon.m_Emoticon = static_cast<protocol7::CNetMsg_Cl_Emoticon*>(pRawMsg7)->m_Emoticon;
+			MsgID = NETMSGTYPE_CL_EMOTICON;
+			pRawMsg = &s_Emoticon;
+		}
+		else if(MsgID == protocol7::NETMSGTYPE_CL_VOTE)
+		{
+			s_Vote.m_Vote = static_cast<protocol7::CNetMsg_Cl_Vote*>(pRawMsg7)->m_Vote;
+			MsgID = NETMSGTYPE_CL_VOTE;
+			pRawMsg = &s_Vote;
+		}
+		else if(MsgID == protocol7::NETMSGTYPE_CL_CALLVOTE)
+		{
+			auto* pMsg7 = static_cast<protocol7::CNetMsg_Cl_CallVote*>(pRawMsg7);
+			s_CallVote.m_pType = pMsg7->m_Type;
+			s_CallVote.m_pValue = pMsg7->m_Value;
+			s_CallVote.m_pReason = pMsg7->m_Reason;
+			MsgID = NETMSGTYPE_CL_CALLVOTE;
+			pRawMsg = &s_CallVote;
+		}
+		else
+			return;
+	}
+	else
+	{
+		pRawMsg = m_NetObjHandler.SecureUnpackMsg(MsgID, pUnpacker);
+	}
 	if(!pRawMsg)
 	{
 		if(g_Config.m_Debug)
@@ -1395,6 +1504,16 @@ bool CGS::IsClientCharacterExist(int ClientID) const
 bool CGS::IsClientMRPG(int ClientID) const
 {
 	return Server()->GetStateClientMRPG(ClientID) || (ClientID >= MAX_PLAYERS && ClientID < MAX_CLIENTS);
+}
+
+void CGS::SendLegacyAccountCode(int ClientID, protocol7::AccountCodeResult Code)
+{
+	if(!Server()->IsSixup(ClientID) || !IsClientMRPG(ClientID))
+		return;
+
+	CMsgPacker Msg(protocol7::NETMSGTYPE_SV_CLIENTPROGRESSAUTH, false, true);
+	Msg.AddInt(static_cast<int>(Code));
+	Server()->SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_FLUSH | MSGFLAG_NORECORD, ClientID);
 }
 
 void* CGS::GetLastInput(int ClientID) const

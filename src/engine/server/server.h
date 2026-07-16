@@ -109,6 +109,10 @@ public:
 
 		int m_ClientVersion;
 		bool m_IsClientMRPG;
+		bool m_Sixup;
+		uint64_t m_aSixupClientInfoHash[VANILLA_MAX_CLIENTS];
+		bool m_aSixupClientInfoActive[VANILLA_MAX_CLIENTS];
+		uint64_t m_SixupGameInfoHash;
 		bool m_JoinFloodChecked;
 		void Reset();
 
@@ -213,6 +217,7 @@ public:
 
 	void SetStateClientMRPG(int ClientID, bool State) override;
 	bool GetStateClientMRPG(int ClientID) const override;
+	bool IsSixup(int ClientID) const override { return ClientID >= 0 && ClientID < MAX_CLIENTS && m_aClients[ClientID].m_Sixup; }
 
 	const char* ClientName(int ClientID) const override;
 	const char* ClientClan(int ClientID) const override;
@@ -226,8 +231,9 @@ public:
 	int SendMotd(int ClientID, const char *pText) override;
 
 	void DoSnapshot(int WorldID);
+	void ConvertSnapshot7(const CSnapshot* pSnapshot, int ClientID);
 
-	static int NewClientCallback(int ClientID, void* pUser);
+	static int NewClientCallback(int ClientID, void* pUser, bool Sixup);
 	static int NewClientNoAuthCallback(int ClientID, void* pUser);
 	static int DelClientCallback(int ClientID, const char* pReason, void* pUser);
 	static int ClientRejoinCallback(int ClientID, void* pUser);

@@ -59,6 +59,7 @@ class DbAuthorization
 		if(!pRes->next())
 		{
 			pContext->GS()->Chat(pContext->GetClientID(), "Login failed: account with this nickname was not found.");
+			pContext->GS()->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_LOGIN_WRONG);
 			return;
 		}
 
@@ -78,6 +79,7 @@ class DbAuthorization
 		if(!pRes->next() || (pRes->getString("Password") != CAccountManager::HashPassword(pContext->Data().m_Password, pRes->getString("PasswordSalt"))))
 		{
 			pContext->GS()->Chat(pContext->GetClientID(), "Login failed: incorrect login or password.");
+			pContext->GS()->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_LOGIN_WRONG);
 			return;
 		}
 
@@ -101,12 +103,14 @@ class DbAuthorization
 			const auto Reason = pRes->getString("Reason");
 			pContext->GS()->Chat(pContext->GetClientID(), "Account is temporarily blocked.");
 			pContext->GS()->Chat(pContext->GetClientID(), "Until: '{}'. Reason: '{}'.", BannedUntil, Reason);
+			pContext->GS()->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_DB_INTERNAL_ERROR);
 			return;
 		}
 
 		if(pContext->GS()->GetPlayerByUserID(pContext->Data().m_AccountID) != nullptr)
 		{
 			pContext->GS()->Chat(pContext->GetClientID(), "This account is already online.");
+			pContext->GS()->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_ALREADY_IN_GAME);
 			return;
 		}
 
@@ -125,6 +129,7 @@ class DbAuthorization
 		{
 			pContext->GS()->Chat(pContext->GetClientID(), "Login failed: account data could not be loaded.");
 			pContext->GS()->Chat(pContext->GetClientID(), "Please reconnect and try again.");
+			pContext->GS()->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_DB_INTERNAL_ERROR);
 			return;
 		}
 
@@ -134,6 +139,7 @@ class DbAuthorization
 
 		pPlayer->Account()->Init(Data.m_AccountID, pContext->GetClientID(), Data.m_Login.c_str(), Data.m_Language, Data.m_LoginDate, std::move(pRes));
 		pContext->GS()->Chat(pContext->GetClientID(), "Login successful. Welcome back!");
+		pContext->GS()->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_LOGIN_OK);
 		if(Data.m_PinCode.empty() && !pPlayer->IsGuestLogin())
 		{
 			pContext->GS()->Chat(pContext->GetClientID(), "Security recommendation: set a PIN code.");
@@ -187,6 +193,7 @@ class DbRegistration
 
 		pContext->GS()->Chat(pContext->GetClientID(), "Registration failed due to server error.");
 		pContext->GS()->Chat(pContext->GetClientID(), "Please try again a bit later.");
+		pContext->GS()->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_DB_INTERNAL_ERROR);
 	}
 
 	static void OnLookup(const CRegistrationContextPtr& pContext, ResultPtr pRes)
@@ -206,6 +213,7 @@ class DbRegistration
 				pGS->Chat(ClientID, "This nickname is already linked to another account.");
 				pGS->Chat(ClientID, "Change nickname or contact support for recovery.");
 				pGS->Chat(ClientID, "Discord: \"{~}\".", g_Config.m_SvDiscordInviteLink);
+				pGS->SendLegacyAccountCode(ClientID, protocol7::AccountCodeResult::AOP_NICKNAME_ALREADY_EXIST);
 				return;
 			}
 
@@ -213,6 +221,7 @@ class DbRegistration
 			{
 				pGS->Chat(ClientID, "This nickname is protected by timeout code.");
 				pGS->Chat(ClientID, "First complete authorization of the previous account.");
+				pGS->SendLegacyAccountCode(ClientID, protocol7::AccountCodeResult::AOP_ALREADY_IN_GAME);
 				return;
 			}
 
@@ -222,12 +231,14 @@ class DbRegistration
 				{
 					pContext->GS()->Chat(pContext->GetClientID(), "Registration update failed.");
 					pContext->GS()->Chat(pContext->GetClientID(), "Please try again later.");
+					pContext->GS()->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_DB_INTERNAL_ERROR);
 					return;
 				}
 
 				pContext->GS()->Chat(pContext->GetClientID(), "Registration completed successfully.");
 				pContext->GS()->Chat(pContext->GetClientID(), "Remember your login and password.");
 				pContext->GS()->Chat(pContext->GetClientID(), "Your nickname is your unique game identifier.");
+				pContext->GS()->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_LOGIN_OK);
 			}, "tw_accounts", "Username = '{}', Password = '{}', PasswordSalt = '{}' WHERE ID = '{}'", Data.m_Login, Data.m_PasswordHash, Data.m_PasswordSalt, AccountID);
 			return;
 		}
@@ -244,6 +255,7 @@ class DbRegistration
 			pGS->Chat(pContext->GetClientID(), "This nickname is already linked to another account.");
 			pGS->Chat(pContext->GetClientID(), "Change nickname or contact support for recovery.");
 			pGS->Chat(pContext->GetClientID(), "Discord: \"{~}\".", g_Config.m_SvDiscordInviteLink);
+			pGS->SendLegacyAccountCode(pContext->GetClientID(), protocol7::AccountCodeResult::AOP_NICKNAME_ALREADY_EXIST);
 			return;
 		}
 

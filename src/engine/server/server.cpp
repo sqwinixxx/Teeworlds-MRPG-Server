@@ -12,6 +12,7 @@
 #include <engine/storage.h>
 
 #include <generated/version.h>
+#include <generated/protocol7.h>
 
 #include <engine/shared/compression.h>
 #include <engine/shared/econ.h>
@@ -20,6 +21,7 @@
 #include <engine/shared/network.h>
 #include <engine/shared/packer.h>
 #include <engine/shared/protocol.h>
+#include <engine/shared/protocol7.h>
 #include <engine/shared/protocol_ex.h>
 #include <engine/shared/snapshot.h>
 #include <mastersrv/mastersrv.h>
@@ -138,6 +140,9 @@ void CServer::CClient::Reset()
 	m_Score = -1;
 	m_NextMapChunk = 0;
 	m_JoinFloodChecked = false;
+	mem_zero(m_aSixupClientInfoHash, sizeof(m_aSixupClientInfoHash));
+	mem_zero(m_aSixupClientInfoActive, sizeof(m_aSixupClientInfoActive));
+	m_SixupGameInfoHash = 0;
 }
 
 CServer::CServer()
@@ -667,10 +672,66 @@ void CServer::InitRconPasswordIfUnset()
 }
 
 
-static inline bool RepackMsg(const CMsgPacker* pMsg, CPacker& Packer)
+static int MsgSixToSeven(int MsgID, bool System)
 {
-	const int MsgId = pMsg->m_MsgID;
+	if(System)
+	{
+		switch(MsgID)
+		{
+		case NETMSG_INFO: return protocol7::NETMSG_INFO;
+		case NETMSG_MAP_CHANGE: return protocol7::NETMSG_MAP_CHANGE;
+		case NETMSG_MAP_DATA: return protocol7::NETMSG_MAP_DATA;
+		case NETMSG_CON_READY: return protocol7::NETMSG_CON_READY;
+		case NETMSG_SNAP: return protocol7::NETMSG_SNAP;
+		case NETMSG_SNAPEMPTY: return protocol7::NETMSG_SNAPEMPTY;
+		case NETMSG_SNAPSINGLE: return protocol7::NETMSG_SNAPSINGLE;
+		case NETMSG_SNAPSMALL: return protocol7::NETMSG_SNAPSMALL;
+		case NETMSG_INPUTTIMING: return protocol7::NETMSG_INPUTTIMING;
+		case NETMSG_RCON_LINE: return protocol7::NETMSG_RCON_LINE;
+		case NETMSG_RCON_CMD_ADD: return protocol7::NETMSG_RCON_CMD_ADD;
+		case NETMSG_RCON_CMD_REM: return protocol7::NETMSG_RCON_CMD_REM;
+		case NETMSG_PING: return protocol7::NETMSG_PING;
+		case NETMSG_PING_REPLY: return protocol7::NETMSG_PING_REPLY;
+		// Legacy 0.7 does not decode UUID-extended 0.6 messages. Forwarding
+		// those packets makes it see NETMSGTYPE_EX (0) as an invalid game
+		// message, so only explicitly converted system messages may pass.
+		default: return -1;
+		}
+	}
+
+	switch(MsgID)
+	{
+	case NETMSGTYPE_SV_MOTD: return protocol7::NETMSGTYPE_SV_MOTD;
+	case NETMSGTYPE_SV_BROADCAST: return protocol7::NETMSGTYPE_SV_BROADCAST;
+	case NETMSGTYPE_SV_CHAT: return protocol7::NETMSGTYPE_SV_CHAT;
+	case NETMSGTYPE_SV_KILLMSG: return protocol7::NETMSGTYPE_SV_KILLMSG;
+	case NETMSGTYPE_SV_TUNEPARAMS: return protocol7::NETMSGTYPE_SV_TUNEPARAMS;
+	case NETMSGTYPE_SV_READYTOENTER: return protocol7::NETMSGTYPE_SV_READYTOENTER;
+	case NETMSGTYPE_SV_WEAPONPICKUP: return protocol7::NETMSGTYPE_SV_WEAPONPICKUP;
+	case NETMSGTYPE_SV_EMOTICON: return protocol7::NETMSGTYPE_SV_EMOTICON;
+	case NETMSGTYPE_SV_VOTECLEAROPTIONS: return protocol7::NETMSGTYPE_SV_VOTECLEAROPTIONS;
+	case NETMSGTYPE_SV_VOTEOPTIONLISTADD: return protocol7::NETMSGTYPE_SV_VOTEOPTIONLISTADD;
+	case NETMSGTYPE_SV_VOTEOPTIONADD: return protocol7::NETMSGTYPE_SV_VOTEOPTIONADD;
+	case NETMSGTYPE_SV_VOTEOPTIONREMOVE: return protocol7::NETMSGTYPE_SV_VOTEOPTIONREMOVE;
+	case NETMSGTYPE_SV_VOTESET: return protocol7::NETMSGTYPE_SV_VOTESET;
+	case NETMSGTYPE_SV_VOTESTATUS: return protocol7::NETMSGTYPE_SV_VOTESTATUS;
+	// Modern UUID game messages have no representation in the legacy
+	// client. Their visual state is provided by ConvertSnapshot7 instead.
+	default: return -1;
+	}
+}
+
+static inline bool RepackMsg(const CMsgPacker* pMsg, CPacker& Packer, bool Sixup)
+{
+	const int OriginalMsgId = pMsg->m_MsgID;
+	int MsgId = OriginalMsgId;
 	Packer.Reset();
+	if(Sixup && !pMsg->m_NoTranslate)
+	{
+		MsgId = MsgSixToSeven(MsgId, pMsg->m_System);
+		if(MsgId < 0)
+			return true;
+	}
 
 	if(MsgId < OFFSET_UUID)
 	{
@@ -680,6 +741,39 @@ static inline bool RepackMsg(const CMsgPacker* pMsg, CPacker& Packer)
 	{
 		Packer.AddInt((0 << 1) | (pMsg->m_System ? 1 : 0)); // NETMSG_EX, NETMSGTYPE_EX
 		g_UuidManager.PackUuid(MsgId, &Packer);
+	}
+
+	if(Sixup && !pMsg->m_NoTranslate && !pMsg->m_System && OriginalMsgId == NETMSGTYPE_SV_CHAT)
+	{
+		CUnpacker Unpacker;
+		Unpacker.Reset(pMsg->Data(), pMsg->Size());
+		const int Team = Unpacker.GetInt();
+		const int ChatterClientID = Unpacker.GetInt();
+		const char* pText = Unpacker.GetString();
+		if(Unpacker.Error())
+			return true;
+		Packer.AddInt(Team ? protocol7::CHAT_TEAM : protocol7::CHAT_ALL);
+		Packer.AddInt(ChatterClientID);
+		Packer.AddInt(-1);
+		Packer.AddString(pText, -1);
+		return false;
+	}
+
+	if(Sixup && !pMsg->m_NoTranslate && !pMsg->m_System && OriginalMsgId == NETMSGTYPE_SV_VOTESET)
+	{
+		CUnpacker Unpacker;
+		Unpacker.Reset(pMsg->Data(), pMsg->Size());
+		const int Timeout = Unpacker.GetInt();
+		const char* pDescription = Unpacker.GetString();
+		const char* pReason = Unpacker.GetString();
+		if(Unpacker.Error())
+			return true;
+		Packer.AddInt(-1);
+		Packer.AddInt(Timeout ? protocol7::VOTE_START_OP : protocol7::VOTE_END_ABORT);
+		Packer.AddInt(Timeout);
+		Packer.AddString(pDescription, -1);
+		Packer.AddString(pReason, -1);
+		return false;
 	}
 	Packer.AddRaw(pMsg->Data(), pMsg->Size());
 
@@ -708,9 +802,11 @@ int CServer::SendMsg(CMsgPacker* pMsg, int Flags, int ClientID, int64_t Mask, in
 	{
 		if(ClientID == -1)
 		{
-			CPacker Pack {};
-			if(RepackMsg(pMsg, Pack))
+			CPacker Pack6 {};
+			CPacker Pack7 {};
+			if(RepackMsg(pMsg, Pack6, false))
 				return -1;
+			const bool HasPack7 = !RepackMsg(pMsg, Pack7, true);
 
 			for(int i = 0; i < MAX_PLAYERS; i++)
 			{
@@ -720,7 +816,9 @@ int CServer::SendMsg(CMsgPacker* pMsg, int Flags, int ClientID, int64_t Mask, in
 					if(Mask != -1 && (Mask & (int64_t)1 << i) == 0)
 						continue;
 
-					const CPacker* pPack = &Pack;
+					const CPacker* pPack = m_aClients[i].m_Sixup ? (HasPack7 ? &Pack7 : nullptr) : &Pack6;
+					if(!pPack)
+						continue;
 					Packet.m_pData = pPack->Data();
 					Packet.m_DataSize = pPack->Size();
 					if(WorldID != -1)
@@ -741,7 +839,7 @@ int CServer::SendMsg(CMsgPacker* pMsg, int Flags, int ClientID, int64_t Mask, in
 		else
 		{
 			CPacker Pack;
-			if(RepackMsg(pMsg, Pack))
+			if(RepackMsg(pMsg, Pack, m_aClients[ClientID].m_Sixup))
 				return -1;
 
 			Packet.m_ClientID = ClientID;
@@ -760,6 +858,241 @@ int CServer::SendMotd(int ClientID, const char* pText)
 	CNetMsg_Sv_Motd Msg;
 	Msg.m_pMessage = pText;
 	return SendPackMsg(&Msg, MSGFLAG_VITAL, ClientID);
+}
+
+void CServer::ConvertSnapshot7(const CSnapshot* pSnapshot, int ClientID)
+{
+	const CNetObj_ClientInfo* apClientInfo[VANILLA_MAX_CLIENTS] = {};
+	const CNetObj_PlayerInfo* apPlayerInfo[VANILLA_MAX_CLIENTS] = {};
+
+	for(int i = 0; i < pSnapshot->NumItems(); ++i)
+	{
+		const CSnapshotItem* pItem = pSnapshot->GetItem(i);
+		const int Type = pSnapshot->GetItemType(i);
+		const int ID = pItem->ID();
+		if(ID < 0 || ID >= VANILLA_MAX_CLIENTS)
+			continue;
+		if(Type == NETOBJTYPE_CLIENTINFO)
+			apClientInfo[ID] = static_cast<const CNetObj_ClientInfo*>(static_cast<const void*>(pItem->Data()));
+		else if(Type == NETOBJTYPE_PLAYERINFO)
+			apPlayerInfo[ID] = static_cast<const CNetObj_PlayerInfo*>(static_cast<const void*>(pItem->Data()));
+	}
+
+	for(int ID = 0; ID < VANILLA_MAX_CLIENTS; ++ID)
+	{
+		const bool Present = apClientInfo[ID] && apPlayerInfo[ID];
+		if(Present)
+		{
+			uint64_t Hash = 1469598103934665603ULL;
+			const int* pInfoData = reinterpret_cast<const int*>(apClientInfo[ID]);
+			for(size_t n = 0; n < sizeof(CNetObj_ClientInfo) / sizeof(int); ++n)
+				Hash = (Hash ^ static_cast<uint32_t>(pInfoData[n])) * 1099511628211ULL;
+			const int* pPlayerData = reinterpret_cast<const int*>(apPlayerInfo[ID]);
+			for(size_t n = 0; n < sizeof(CNetObj_PlayerInfo) / sizeof(int); ++n)
+				Hash = (Hash ^ static_cast<uint32_t>(pPlayerData[n])) * 1099511628211ULL;
+
+			if(!m_aClients[ClientID].m_aSixupClientInfoActive[ID] || m_aClients[ClientID].m_aSixupClientInfoHash[ID] != Hash)
+			{
+				char aName[MAX_NAME_LENGTH];
+				char aClan[MAX_CLAN_LENGTH];
+				IntsToStr(&apClientInfo[ID]->m_Name0, 4, aName);
+				IntsToStr(&apClientInfo[ID]->m_Clan0, 3, aClan);
+				static const char* s_apSkinParts[protocol7::NUM_SKINPARTS] = {"standard", "", "", "standard", "standard", "standard"};
+
+				CMsgPacker Msg(protocol7::NETMSGTYPE_SV_CLIENTINFO, false, true);
+				Msg.AddInt(ID);
+				Msg.AddInt(apPlayerInfo[ID]->m_Local);
+				Msg.AddInt(apPlayerInfo[ID]->m_Team);
+				Msg.AddString(aName, -1);
+				Msg.AddString(aClan, -1);
+				Msg.AddInt(apClientInfo[ID]->m_Country);
+				for(const char* pPart : s_apSkinParts)
+					Msg.AddString(pPart, -1);
+				for(int p = 0; p < protocol7::NUM_SKINPARTS; ++p)
+					Msg.AddInt((p == protocol7::SKINPART_BODY || p == protocol7::SKINPART_FEET) ? apClientInfo[ID]->m_UseCustomColor : 0);
+				for(int p = 0; p < protocol7::NUM_SKINPARTS; ++p)
+					Msg.AddInt(p == protocol7::SKINPART_FEET ? apClientInfo[ID]->m_ColorFeet : apClientInfo[ID]->m_ColorBody);
+				Msg.AddInt(1);
+				SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_NORECORD, ClientID);
+				m_aClients[ClientID].m_aSixupClientInfoHash[ID] = Hash;
+			}
+		}
+		else if(m_aClients[ClientID].m_aSixupClientInfoActive[ID])
+		{
+			CMsgPacker Msg(protocol7::NETMSGTYPE_SV_CLIENTDROP, false, true);
+			Msg.AddInt(ID);
+			Msg.AddString("", -1);
+			Msg.AddInt(1);
+			SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_NORECORD, ClientID);
+		}
+		m_aClients[ClientID].m_aSixupClientInfoActive[ID] = Present;
+	}
+
+	m_SnapshotBuilder.Init();
+	auto CopyItem = [&](int Type, int ID, const void* pData, int Size) {
+		void* pDst = m_SnapshotBuilder.NewItem(Type, ID, Size);
+		if(pDst)
+			mem_copy(pDst, pData, Size);
+		return pDst;
+	};
+
+	for(int i = 0; i < pSnapshot->NumItems(); ++i)
+	{
+		const CSnapshotItem* pItem = pSnapshot->GetItem(i);
+		const int Type = pSnapshot->GetItemType(i);
+		const int ID = pItem->ID();
+		const void* pData = pItem->Data();
+
+		switch(Type)
+		{
+		case NETOBJTYPE_PROJECTILE:
+			CopyItem(protocol7::NETOBJTYPE_PROJECTILE, ID, pData, sizeof(protocol7::CNetObj_Projectile));
+			break;
+		case NETOBJTYPE_LASER:
+			CopyItem(protocol7::NETOBJTYPE_LASER, ID, pData, sizeof(protocol7::CNetObj_Laser));
+			break;
+		case NETOBJTYPE_PICKUP:
+		{
+			const auto* pSrc = static_cast<const CNetObj_Pickup*>(pData);
+			protocol7::CNetObj_Pickup Dst {pSrc->m_X, pSrc->m_Y, pSrc->m_Type};
+			CopyItem(protocol7::NETOBJTYPE_PICKUP, ID, &Dst, sizeof(Dst));
+			break;
+		}
+		case NETOBJTYPE_FLAG:
+			CopyItem(protocol7::NETOBJTYPE_FLAG, ID, pData, sizeof(protocol7::CNetObj_Flag));
+			break;
+		case NETOBJTYPE_GAMEINFO:
+		{
+			const auto* pSrc = static_cast<const CNetObj_GameInfo*>(pData);
+			protocol7::CNetObj_GameData Dst {};
+			Dst.m_GameStartTick = pSrc->m_RoundStartTick;
+			Dst.m_GameStateFlags = pSrc->m_GameStateFlags;
+			Dst.m_GameStateEndTick = pSrc->m_WarmupTimer > 0 ? Tick() + pSrc->m_WarmupTimer : 0;
+			CopyItem(protocol7::NETOBJTYPE_GAMEDATA, ID, &Dst, sizeof(Dst));
+
+			uint64_t Hash = static_cast<uint32_t>(pSrc->m_GameFlags);
+			Hash = Hash * 1099511628211ULL + static_cast<uint32_t>(pSrc->m_ScoreLimit);
+			Hash = Hash * 1099511628211ULL + static_cast<uint32_t>(pSrc->m_TimeLimit);
+			Hash = Hash * 1099511628211ULL + static_cast<uint32_t>(pSrc->m_RoundNum);
+			Hash = Hash * 1099511628211ULL + static_cast<uint32_t>(pSrc->m_RoundCurrent);
+			if(m_aClients[ClientID].m_SixupGameInfoHash != Hash)
+			{
+				CMsgPacker Msg(protocol7::NETMSGTYPE_SV_GAMEINFO, false, true);
+				Msg.AddInt(pSrc->m_GameFlags);
+				Msg.AddInt(pSrc->m_ScoreLimit);
+				Msg.AddInt(pSrc->m_TimeLimit);
+				Msg.AddInt(pSrc->m_RoundNum);
+				Msg.AddInt(pSrc->m_RoundCurrent);
+				SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_NORECORD, ClientID);
+				m_aClients[ClientID].m_SixupGameInfoHash = Hash;
+			}
+			break;
+		}
+		case NETOBJTYPE_GAMEDATA:
+		{
+			const auto* pSrc = static_cast<const CNetObj_GameData*>(pData);
+			protocol7::CNetObj_GameDataTeam Team {pSrc->m_TeamscoreRed, pSrc->m_TeamscoreBlue};
+			protocol7::CNetObj_GameDataFlag Flag {pSrc->m_FlagCarrierRed, pSrc->m_FlagCarrierBlue, 0, 0};
+			CopyItem(protocol7::NETOBJTYPE_GAMEDATATEAM, ID, &Team, sizeof(Team));
+			CopyItem(protocol7::NETOBJTYPE_GAMEDATAFLAG, ID, &Flag, sizeof(Flag));
+			break;
+		}
+		case NETOBJTYPE_CHARACTERCORE:
+			CopyItem(protocol7::NETOBJTYPE_CHARACTERCORE, ID, pData, sizeof(protocol7::CNetObj_CharacterCore));
+			break;
+		case NETOBJTYPE_CHARACTER:
+		{
+			const auto* pSrc = static_cast<const CNetObj_Character*>(pData);
+			protocol7::CNetObj_Character Dst {};
+			mem_copy(static_cast<protocol7::CNetObj_CharacterCore*>(&Dst), static_cast<const CNetObj_CharacterCore*>(pSrc), sizeof(protocol7::CNetObj_CharacterCore));
+			Dst.m_Health = pSrc->m_Health;
+			Dst.m_Armor = pSrc->m_Armor;
+			Dst.m_AmmoCount = pSrc->m_AmmoCount;
+			Dst.m_Weapon = pSrc->m_Weapon;
+			Dst.m_Emote = pSrc->m_Emote;
+			Dst.m_AttackTick = pSrc->m_AttackTick;
+			Dst.m_TriggeredEvents = 0;
+			CopyItem(protocol7::NETOBJTYPE_CHARACTER, ID, &Dst, sizeof(Dst));
+			break;
+		}
+		case NETOBJTYPE_PLAYERINFO:
+		{
+			const auto* pSrc = static_cast<const CNetObj_PlayerInfo*>(pData);
+			protocol7::CNetObj_PlayerInfo Dst {};
+			if(pSrc->m_ClientId >= 0 && pSrc->m_ClientId < VANILLA_MAX_CLIENTS)
+			{
+				const CNetObj_PlayerInfo* pFlags = pSrc;
+				(void)pFlags;
+			}
+			Dst.m_PlayerFlags = 0;
+			Dst.m_Score = pSrc->m_Score;
+			Dst.m_Latency = pSrc->m_Latency;
+			CopyItem(protocol7::NETOBJTYPE_PLAYERINFO, ID, &Dst, sizeof(Dst));
+			break;
+		}
+		case NETOBJTYPE_SPECTATORINFO:
+		{
+			const auto* pSrc = static_cast<const CNetObj_SpectatorInfo*>(pData);
+			protocol7::CNetObj_SpectatorInfo Dst {};
+			Dst.m_SpecMode = pSrc->m_SpectatorId >= 0 ? protocol7::SPEC_PLAYER : protocol7::SPEC_FREEVIEW;
+			Dst.m_SpectatorID = pSrc->m_SpectatorId;
+			Dst.m_X = pSrc->m_X;
+			Dst.m_Y = pSrc->m_Y;
+			CopyItem(protocol7::NETOBJTYPE_SPECTATORINFO, ID, &Dst, sizeof(Dst));
+			break;
+		}
+		case NETEVENTTYPE_EXPLOSION:
+			CopyItem(protocol7::NETEVENTTYPE_EXPLOSION, ID, pData, sizeof(protocol7::CNetEvent_Explosion));
+			break;
+		case NETEVENTTYPE_SPAWN:
+			CopyItem(protocol7::NETEVENTTYPE_SPAWN, ID, pData, sizeof(protocol7::CNetEvent_Spawn));
+			break;
+		case NETEVENTTYPE_HAMMERHIT:
+			CopyItem(protocol7::NETEVENTTYPE_HAMMERHIT, ID, pData, sizeof(protocol7::CNetEvent_HammerHit));
+			break;
+		case NETEVENTTYPE_DEATH:
+			CopyItem(protocol7::NETEVENTTYPE_DEATH, ID, pData, sizeof(protocol7::CNetEvent_Death));
+			break;
+		case NETEVENTTYPE_SOUNDGLOBAL:
+		case NETEVENTTYPE_SOUNDWORLD:
+			CopyItem(protocol7::NETEVENTTYPE_SOUNDWORLD, ID, pData, sizeof(protocol7::CNetEvent_SoundWorld));
+			break;
+		case NETEVENTTYPE_DAMAGEIND:
+		{
+			const auto* pSrc = static_cast<const CNetEvent_DamageInd*>(pData);
+			protocol7::CNetEvent_Damage Dst {};
+			Dst.m_X = pSrc->m_X;
+			Dst.m_Y = pSrc->m_Y;
+			Dst.m_ClientID = 0;
+			Dst.m_Angle = pSrc->m_Angle;
+			CopyItem(protocol7::NETEVENTTYPE_DAMAGE, ID, &Dst, sizeof(Dst));
+			break;
+		}
+		case NETOBJTYPE_DDNETLASER:
+		{
+			const auto* pSrc = static_cast<const CNetObj_DDNetLaser*>(pData);
+			protocol7::CNetObj_Laser Dst {pSrc->m_ToX, pSrc->m_ToY, pSrc->m_FromX, pSrc->m_FromY, pSrc->m_StartTick};
+			CopyItem(protocol7::NETOBJTYPE_LASER, ID, &Dst, sizeof(Dst));
+			break;
+		}
+		case NETOBJTYPE_DDNETPROJECTILE:
+		{
+			const auto* pSrc = static_cast<const CNetObj_DDNetProjectile*>(pData);
+			protocol7::CNetObj_Projectile Dst {pSrc->m_X, pSrc->m_Y, pSrc->m_VelX, pSrc->m_VelY, pSrc->m_Type, pSrc->m_StartTick};
+			CopyItem(protocol7::NETOBJTYPE_PROJECTILE, ID, &Dst, sizeof(Dst));
+			break;
+		}
+		case NETOBJTYPE_DDNETPICKUP:
+		{
+			const auto* pSrc = static_cast<const CNetObj_DDNetPickup*>(pData);
+			protocol7::CNetObj_Pickup Dst {pSrc->m_X, pSrc->m_Y, pSrc->m_Type};
+			CopyItem(protocol7::NETOBJTYPE_PICKUP, ID, &Dst, sizeof(Dst));
+			break;
+		}
+		default:
+			break;
+		}
+	}
 }
 
 void CServer::DoSnapshot(int WorldID)
@@ -782,6 +1115,13 @@ void CServer::DoSnapshot(int WorldID)
 			m_SnapshotBuilder.Init();
 
 			GameServer(WorldID)->OnSnap(i);
+
+			if(m_aClients[i].m_Sixup)
+			{
+				char aSnapshot6[CSnapshot::MAX_SIZE];
+				m_SnapshotBuilder.Finish(aSnapshot6);
+				ConvertSnapshot7(reinterpret_cast<const CSnapshot*>(aSnapshot6), i);
+			}
 
 			// finish snapshot
 			char aData[CSnapshot::MAX_SIZE];
@@ -812,6 +1152,49 @@ void CServer::DoSnapshot(int WorldID)
 			}
 
 			// create delta
+			for(int Type = 0; Type < 64; ++Type)
+				m_SnapshotDelta.SetStaticsize(Type, 0);
+			if(m_aClients[i].m_Sixup)
+			{
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_PROJECTILE, sizeof(protocol7::CNetObj_Projectile));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_LASER, sizeof(protocol7::CNetObj_Laser));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_PICKUP, sizeof(protocol7::CNetObj_Pickup));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_FLAG, sizeof(protocol7::CNetObj_Flag));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_GAMEDATA, sizeof(protocol7::CNetObj_GameData));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_GAMEDATATEAM, sizeof(protocol7::CNetObj_GameDataTeam));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_GAMEDATAFLAG, sizeof(protocol7::CNetObj_GameDataFlag));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_CHARACTERCORE, sizeof(protocol7::CNetObj_CharacterCore));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_CHARACTER, sizeof(protocol7::CNetObj_Character));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_PLAYERINFO, sizeof(protocol7::CNetObj_PlayerInfo));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETOBJTYPE_SPECTATORINFO, sizeof(protocol7::CNetObj_SpectatorInfo));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETEVENTTYPE_EXPLOSION, sizeof(protocol7::CNetEvent_Explosion));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETEVENTTYPE_SPAWN, sizeof(protocol7::CNetEvent_Spawn));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETEVENTTYPE_HAMMERHIT, sizeof(protocol7::CNetEvent_HammerHit));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETEVENTTYPE_DEATH, sizeof(protocol7::CNetEvent_Death));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETEVENTTYPE_SOUNDWORLD, sizeof(protocol7::CNetEvent_SoundWorld));
+				m_SnapshotDelta.SetStaticsize(protocol7::NETEVENTTYPE_DAMAGE, sizeof(protocol7::CNetEvent_Damage));
+			}
+			else
+			{
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_PROJECTILE, sizeof(CNetObj_Projectile));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_LASER, sizeof(CNetObj_Laser));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_PICKUP, sizeof(CNetObj_Pickup));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_FLAG, sizeof(CNetObj_Flag));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_GAMEINFO, sizeof(CNetObj_GameInfo));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_GAMEDATA, sizeof(CNetObj_GameData));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_CHARACTERCORE, sizeof(CNetObj_CharacterCore));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_CHARACTER, sizeof(CNetObj_Character));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_PLAYERINFO, sizeof(CNetObj_PlayerInfo));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_CLIENTINFO, sizeof(CNetObj_ClientInfo));
+				m_SnapshotDelta.SetStaticsize(NETOBJTYPE_SPECTATORINFO, sizeof(CNetObj_SpectatorInfo));
+				m_SnapshotDelta.SetStaticsize(NETEVENTTYPE_EXPLOSION, sizeof(CNetEvent_Explosion));
+				m_SnapshotDelta.SetStaticsize(NETEVENTTYPE_SPAWN, sizeof(CNetEvent_Spawn));
+				m_SnapshotDelta.SetStaticsize(NETEVENTTYPE_HAMMERHIT, sizeof(CNetEvent_HammerHit));
+				m_SnapshotDelta.SetStaticsize(NETEVENTTYPE_DEATH, sizeof(CNetEvent_Death));
+				m_SnapshotDelta.SetStaticsize(NETEVENTTYPE_SOUNDGLOBAL, sizeof(CNetEvent_SoundGlobal));
+				m_SnapshotDelta.SetStaticsize(NETEVENTTYPE_SOUNDWORLD, sizeof(CNetEvent_SoundWorld));
+				m_SnapshotDelta.SetStaticsize(NETEVENTTYPE_DAMAGEIND, sizeof(CNetEvent_DamageInd));
+			}
 			char aDeltaData[CSnapshot::MAX_SIZE];
 			if(int DeltaSize = m_SnapshotDelta.CreateDelta(pDeltashot, pData, aDeltaData))
 			{
@@ -897,13 +1280,14 @@ int CServer::NewClientNoAuthCallback(int ClientID, void* pUser)
 	pThis->m_aClients[ClientID].m_DDNetVersionSettled = false;
 	pThis->m_aClients[ClientID].m_SpectatorID = SPEC_FREEVIEW;
 	pThis->m_aClients[ClientID].Reset();
+	pThis->m_aClients[ClientID].m_Sixup = false;
 
 	pThis->SendCapabilities(ClientID);
 	pThis->SendMap(ClientID);
 	return 0;
 }
 
-int CServer::NewClientCallback(int ClientID, void* pUser)
+int CServer::NewClientCallback(int ClientID, void* pUser, bool Sixup)
 {
 	CServer* pThis = (CServer*)pUser;
 	int* pIdMap = pThis->GetIdMap(ClientID);
@@ -933,6 +1317,9 @@ int CServer::NewClientCallback(int ClientID, void* pUser)
 	pThis->m_aClients[ClientID].m_DDNetVersionSettled = false;
 	mem_zero(&pThis->m_aClients[ClientID].m_Addr, sizeof(NETADDR));
 	pThis->m_aClients[ClientID].Reset();
+	pThis->m_aClients[ClientID].m_Sixup = Sixup;
+	if(Sixup)
+		pThis->m_aClients[ClientID].m_IsClientMRPG = true;
 	return 0;
 }
 
@@ -1002,10 +1389,13 @@ void CServer::SendMapData(int ClientID, int Chunk)
 	}
 
 	CMsgPacker Msg(NETMSG_MAP_DATA, true);
-	Msg.AddInt(Last);
-	Msg.AddInt(Crc);
-	Msg.AddInt(Chunk);
-	Msg.AddInt(ChunkSize);
+	if(!IsSixup(ClientID))
+	{
+		Msg.AddInt(Last);
+		Msg.AddInt(Crc);
+		Msg.AddInt(Chunk);
+		Msg.AddInt(ChunkSize);
+	}
 	Msg.AddRaw(&pCurrentMapData[Offset], ChunkSize);
 	SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_FLUSH, ClientID);
 
@@ -1047,6 +1437,25 @@ void CServer::SendMap(int ClientID)
 		Msg.AddString(pWorldName, 0);
 		Msg.AddInt(pMapDetail->GetCrc());
 		Msg.AddInt(pMapDetail->GetSize());
+		if(IsSixup(ClientID))
+		{
+			const SHA256_DIGEST Sha256 = pMapDetail->GetSha256();
+			Msg.AddInt(g_Config.m_SvMapWindow);
+			Msg.AddInt(1024 - 128);
+			Msg.AddRaw(Sha256.data, sizeof(Sha256.data));
+		}
+		SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_FLUSH, ClientID);
+	}
+
+	if(IsSixup(ClientID))
+	{
+		// A zero-sized legacy data package tells the bridged MRPG client that
+		// this server exposes its data through the modern 0.6 protocol.
+		CMsgPacker Msg(protocol7::NETMSG_DATA_MMO_INFO, true, true);
+		Msg.AddInt(0);
+		Msg.AddInt(0);
+		Msg.AddInt(0);
+		Msg.AddInt(0);
 		SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_FLUSH, ClientID);
 	}
 
@@ -1175,6 +1584,23 @@ void CServer::ProcessClientPacket(CNetChunk* pPacket)
 		SendMsg(&Packer, MSGFLAG_VITAL, ClientID);
 	}
 
+	if(m_aClients[ClientID].m_Sixup && Sys && MsgID < OFFSET_UUID)
+	{
+		switch(MsgID)
+		{
+		case protocol7::NETMSG_INFO: MsgID = NETMSG_INFO; break;
+		case protocol7::NETMSG_READY: MsgID = NETMSG_READY; break;
+		case protocol7::NETMSG_ENTERGAME: MsgID = NETMSG_ENTERGAME; break;
+		case protocol7::NETMSG_INPUT: MsgID = NETMSG_INPUT; break;
+		case protocol7::NETMSG_RCON_CMD: MsgID = NETMSG_RCON_CMD; break;
+		case protocol7::NETMSG_RCON_AUTH: MsgID = NETMSG_RCON_AUTH; break;
+		case protocol7::NETMSG_REQUEST_MAP_DATA: MsgID = NETMSG_REQUEST_MAP_DATA; break;
+		case protocol7::NETMSG_PING: MsgID = NETMSG_PING; break;
+		case protocol7::NETMSG_PING_REPLY: MsgID = NETMSG_PING_REPLY; break;
+		default: return;
+		}
+	}
+
 	if(Sys)
 	{
 		// system message
@@ -1222,6 +1648,16 @@ void CServer::ProcessClientPacket(CNetChunk* pPacket)
 		{
 			if((pPacket->m_Flags & NET_CHUNKFLAG_VITAL) == 0 || m_aClients[ClientID].m_State < CClient::STATE_CONNECTING)
 				return;
+
+			// 0.7 requests a complete window of map chunks and does not put a
+			// chunk index into NETMSG_REQUEST_MAP_DATA. Reading an integer here
+			// marks the empty packet as invalid and leaves the client waiting.
+			if(m_aClients[ClientID].m_Sixup)
+			{
+				for(int i = 0; i < g_Config.m_SvMapWindow; i++)
+					SendMapData(ClientID, m_aClients[ClientID].m_NextMapChunk++);
+				return;
+			}
 
 			const int Chunk = Unpacker.GetInt();
 			if(Chunk != m_aClients[ClientID].m_NextMapChunk || !g_Config.m_SvFastDownload)
@@ -1351,6 +1787,16 @@ void CServer::ProcessClientPacket(CNetChunk* pPacket)
 				currentInput.m_aData[i] = 0;
 			if(Unpacker.Error())
 				return;
+			if(client.m_Sixup && InputSize > 6)
+			{
+				const int Flags7 = currentInput.m_aData[6];
+				int Flags6 = PLAYERFLAG_PLAYING;
+				if(Flags7 & protocol7::PLAYERFLAG_CHATTING)
+					Flags6 |= PLAYERFLAG_CHATTING;
+				if(Flags7 & protocol7::PLAYERFLAG_SCOREBOARD)
+					Flags6 |= PLAYERFLAG_SCOREBOARD;
+				currentInput.m_aData[6] = Flags6;
+			}
 
 			mem_copy(client.m_LatestInput.m_aData, currentInput.m_aData, sizeof(client.m_LatestInput.m_aData));
 

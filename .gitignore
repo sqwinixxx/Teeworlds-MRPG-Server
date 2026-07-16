@@ -68,3 +68,7 @@ rules.ninja
 MinSizeRel/mastersrv.exe
 MinSizeRel/versionsrv.exe
 *.code-workspace
+
+# Runtime-generated server tracking caches
+server_data/attribute_tracking.json
+server_data/leveling_tracking.json

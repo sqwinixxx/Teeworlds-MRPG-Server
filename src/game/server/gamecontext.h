@@ -4,6 +4,7 @@
 #define GAME_SERVER_GAMECONTEXT_H
 #include <engine/server.h>
 #include <game/collision.h>
+#include <generated/protocol7.h>
 
 #include "eventhandler.h"
 #include "gamecontroller.h"
@@ -45,6 +46,7 @@ class CGS : public IGameServer
 	CBroadcastState m_aBroadcastStates[MAX_PLAYERS];
 	CCollision m_Collision;
 	CNetObjHandler m_NetObjHandler;
+	protocol7::CNetObjHandler m_NetObjHandler7;
 	CTuningParams m_Tuning;
 	bool m_AllowedPVP;
 	vec2 m_JailPosition;
@@ -130,6 +132,7 @@ public:
 	bool IsClientPlayer(int ClientID) const override;
 	bool IsClientCharacterExist(int ClientID) const override;
 	bool IsClientMRPG(int ClientID) const;
+	void SendLegacyAccountCode(int ClientID, protocol7::AccountCodeResult Code);
 	bool PlayerExists(int ClientID) const override { return m_apPlayers[ClientID]; }
 	void* GetLastInput(int ClientID) const override;
 	int GetClientVersion(int ClientID) const;

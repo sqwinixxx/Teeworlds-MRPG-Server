@@ -50,6 +50,11 @@ enum
 
 	NETMSG_MAPLIST_ENTRY_ADD, // todo 0.8: move up
 	NETMSG_MAPLIST_ENTRY_REM,
+
+	// Legacy MRPG 0.7 extension.
+	NETMSG_DATA_MMO_INFO,
+	NETMSG_DATA_MMO,
+	NETMSG_REQUEST_MMO_DATA,
 };
 
 }
